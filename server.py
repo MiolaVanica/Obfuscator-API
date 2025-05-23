@@ -11,6 +11,7 @@ import secrets
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 import logging
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -99,7 +100,15 @@ async def execute_code(request: ExecutionRequest):
     try:
         # Validate and load client public key
         client_public_key = serialization.load_pem_public_key(request.client_public_key.encode())
-        # Test encryption with a small message to verify key
+        if not isinstance(client_public_key, RSAPublicKey):
+            logger.error("Client public key is not an RSA public key")
+            raise HTTPException(status_code=400, detail="Client public key is not an RSA public key")
+        # Verify key size (2048 bits = 256 bytes)
+        key_size = client_public_key.key_size
+        if key_size != 2048:
+            logger.error(f"Invalid key size: {key_size} bits, expected 2048")
+            raise HTTPException(status_code=400, detail=f"Invalid key size: {key_size} bits")
+        # Test encryption with a small message
         test_message = b"test"
         client_public_key.encrypt(
             test_message,
@@ -109,6 +118,7 @@ async def execute_code(request: ExecutionRequest):
                 label=None
             )
         )
+        logger.info("Client public key validated successfully")
     except Exception as e:
         logger.error(f"Invalid or incompatible client public key: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid client public key: {str(e)}")
@@ -140,6 +150,10 @@ async def execute_code(request: ExecutionRequest):
         for code, original in reverse_mapping.items():
             decrypted_code = decrypted_code.replace(code, original)
         
+        # Log code size for debugging
+        code_size = len(decrypted_code.encode())
+        logger.info(f"Decrypted code size: {code_size} bytes")
+        
         try:
             encrypted_code = request_data["client_public_key"].encrypt(
                 decrypted_code.encode(),
@@ -149,10 +163,14 @@ async def execute_code(request: ExecutionRequest):
                     label=None
                 )
             )
-        except Exception as e:
+        except ValueError as e:
             logger.error(f"Encryption failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Encryption failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected encryption error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unexpected encryption error: {str(e)}")
         
+        logger.info(f"Successfully encrypted code for request ID: {request_id}")
         return {"encrypted_code": encrypted_code.hex()}
     else:
         logger.info(f"Request ID {request_id} rejected")
@@ -180,7 +198,6 @@ async def handle_callback(update: dict):
             return {"status": "success"}
         elif "message" in update:
             logger.info(f"Ignoring text message: {update['message'].get('text', '')}")
-            # Optionally respond to the user
             try:
                 bot = Bot(token=APPROVAL_BOT_TOKEN)
                 await bot.send_message(
