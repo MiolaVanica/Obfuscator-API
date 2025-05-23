@@ -97,10 +97,21 @@ async def get_public_key():
 async def execute_code(request: ExecutionRequest):
     logger.info(f"Received execution request with session_key: {request.session_key}")
     try:
+        # Validate and load client public key
         client_public_key = serialization.load_pem_public_key(request.client_public_key.encode())
+        # Test encryption with a small message to verify key
+        test_message = b"test"
+        client_public_key.encrypt(
+            test_message,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
     except Exception as e:
-        logger.error(f"Invalid client public key: {str(e)}")
-        raise HTTPException(status_code=400, detail="Invalid client public key")
+        logger.error(f"Invalid or incompatible client public key: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Invalid client public key: {str(e)}")
 
     request_id = secrets.token_hex(16)
     pending_requests[request_id] = {
@@ -129,14 +140,19 @@ async def execute_code(request: ExecutionRequest):
         for code, original in reverse_mapping.items():
             decrypted_code = decrypted_code.replace(code, original)
         
-        encrypted_code = request_data["client_public_key"].encrypt(
-            decrypted_code.encode(),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
+        try:
+            encrypted_code = request_data["client_public_key"].encrypt(
+                decrypted_code.encode(),
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
             )
-        )
+        except Exception as e:
+            logger.error(f"Encryption failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Encryption failed: {str(e)}")
+        
         return {"encrypted_code": encrypted_code.hex()}
     else:
         logger.info(f"Request ID {request_id} rejected")
@@ -146,21 +162,37 @@ async def execute_code(request: ExecutionRequest):
 async def handle_callback(update: dict):
     logger.info(f"Received Telegram update: {update}")
     try:
-        callback_data = update.get("callback_query", {}).get("data", "")
-        if not callback_data:
-            logger.error("No callback data in update")
-            return {"status": "error", "message": "No callback data"}
-        action, request_id = callback_data.split("_", 1)
-        if request_id not in pending_requests:
-            logger.error(f"Invalid request ID: {request_id}")
-            return {"status": "error", "message": "Invalid request ID"}
-        if action == "accept":
-            pending_requests[request_id]["status"] = "approved"
-            logger.info(f"Approved request ID: {request_id}")
-        elif action == "reject":
-            pending_requests[request_id]["status"] = "rejected"
-            logger.info(f"Rejected request ID: {request_id}")
-        return {"status": "success"}
+        if "callback_query" in update:
+            callback_data = update["callback_query"].get("data", "")
+            if not callback_data:
+                logger.error("No callback data in callback_query")
+                return {"status": "error", "message": "No callback data"}
+            action, request_id = callback_data.split("_", 1)
+            if request_id not in pending_requests:
+                logger.error(f"Invalid request ID: {request_id}")
+                return {"status": "error", "message": "Invalid request ID"}
+            if action == "accept":
+                pending_requests[request_id]["status"] = "approved"
+                logger.info(f"Approved request ID: {request_id}")
+            elif action == "reject":
+                pending_requests[request_id]["status"] = "rejected"
+                logger.info(f"Rejected request ID: {request_id}")
+            return {"status": "success"}
+        elif "message" in update:
+            logger.info(f"Ignoring text message: {update['message'].get('text', '')}")
+            # Optionally respond to the user
+            try:
+                bot = Bot(token=APPROVAL_BOT_TOKEN)
+                await bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="Please use the Approve/Reject buttons to manage execution requests."
+                )
+            except Exception as e:
+                logger.error(f"Failed to send response message: {str(e)}")
+            return {"status": "success", "message": "Ignored text message"}
+        else:
+            logger.error("Unknown update type")
+            return {"status": "error", "message": "Unknown update type"}
     except Exception as e:
         logger.error(f"Error handling callback: {str(e)}")
         raise HTTPException(status_code=500, detail="Error handling callback")
