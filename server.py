@@ -143,9 +143,13 @@ async def execute_code(request: ExecutionRequest):
         raise HTTPException(status_code=403, detail="Decryption Rejected! Contact @SCDP3")
 
 @app.post("/handle_callback")
-async def handle_callback(callback_data: str):
-    logger.info(f"Received callback: {callback_data}")
+async def handle_callback(update: dict):
+    logger.info(f"Received Telegram update: {update}")
     try:
+        callback_data = update.get("callback_query", {}).get("data", "")
+        if not callback_data:
+            logger.error("No callback data in update")
+            return {"status": "error", "message": "No callback data"}
         action, request_id = callback_data.split("_", 1)
         if request_id not in pending_requests:
             logger.error(f"Invalid request ID: {request_id}")
