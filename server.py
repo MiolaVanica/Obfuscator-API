@@ -30,7 +30,7 @@ API_SECRET = os.getenv("API_SECRET")
 private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 public_key = private_key.public_key()
 
-# Load Fernet key
+# Load Fernet key for obfuscated code
 with open("fernet_key.bin", "rb") as f:
     FERNET_KEY = f.read()
 fernet = Fernet(FERNET_KEY)
@@ -103,12 +103,10 @@ async def execute_code(request: ExecutionRequest):
         if not isinstance(client_public_key, RSAPublicKey):
             logger.error("Client public key is not an RSA public key")
             raise HTTPException(status_code=400, detail="Client public key is not an RSA public key")
-        # Verify key size (2048 bits = 256 bytes)
         key_size = client_public_key.key_size
         if key_size != 2048:
             logger.error(f"Invalid key size: {key_size} bits, expected 2048")
             raise HTTPException(status_code=400, detail=f"Invalid key size: {key_size} bits")
-        # Test encryption with a small message
         test_message = b"test"
         client_public_key.encrypt(
             test_message,
@@ -150,28 +148,33 @@ async def execute_code(request: ExecutionRequest):
         for code, original in reverse_mapping.items():
             decrypted_code = decrypted_code.replace(code, original)
         
-        # Log code size for debugging
         code_size = len(decrypted_code.encode())
         logger.info(f"Decrypted code size: {code_size} bytes")
         
         try:
-            encrypted_code = request_data["client_public_key"].encrypt(
-                decrypted_code.encode(),
+            # Generate a new Fernet key for hybrid encryption
+            fernet_key = Fernet.generate_key()
+            fernet = Fernet(fernet_key)
+            encrypted_code = fernet.encrypt(decrypted_code.encode())
+            
+            # Encrypt the Fernet key with the client's RSA public key
+            encrypted_fernet_key = request_data["client_public_key"].encrypt(
+                fernet_key,
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
                     label=None
                 )
             )
-        except ValueError as e:
+        except Exception as e:
             logger.error(f"Encryption failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Encryption failed: {str(e)}")
-        except Exception as e:
-            logger.error(f"Unexpected encryption error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Unexpected encryption error: {str(e)}")
         
         logger.info(f"Successfully encrypted code for request ID: {request_id}")
-        return {"encrypted_code": encrypted_code.hex()}
+        return {
+            "encrypted_code": encrypted_code.hex(),
+            "encrypted_fernet_key": encrypted_fernet_key.hex()
+        }
     else:
         logger.info(f"Request ID {request_id} rejected")
         raise HTTPException(status_code=403, detail="Decryption Rejected! Contact @SCDP3")
