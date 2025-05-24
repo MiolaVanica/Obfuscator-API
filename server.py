@@ -185,6 +185,7 @@ async def handle_callback(update: dict):
     try:
         if "callback_query" in update:
             callback_data = update["callback_query"].get("data", "")
+            callback_query_id = update["callback_query"].get("id", "")
             if not callback_data:
                 logger.error("No callback data in callback_query")
                 return {"status": "error", "message": "No callback data"}
@@ -198,6 +199,13 @@ async def handle_callback(update: dict):
             elif action == "reject":
                 pending_requests[request_id]["status"] = "rejected"
                 logger.info(f"Rejected request ID: {request_id}")
+            # Answer the callback query to stop the loading animation
+            try:
+                bot = Bot(token=APPROVAL_BOT_TOKEN)
+                await bot.answer_callback_query(callback_query_id=callback_query_id)
+                logger.info(f"Answered callback query ID: {callback_query_id}")
+            except Exception as e:
+                logger.error(f"Failed to answer callback query: {str(e)}")
             return {"status": "success"}
         elif "message" in update:
             logger.info(f"Ignoring text message: {update['message'].get('text', '')}")
