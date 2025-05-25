@@ -2,7 +2,7 @@ import os
 import asyncio
 import secrets
 from typing import Dict
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from cryptography.fernet import Fernet
 import telegram
@@ -30,14 +30,19 @@ class ExecutionRequest(BaseModel):
     secret: str
     session_key: str
 
+# Relaxed model to accept raw JSON
 class CallbackRequest(BaseModel):
-    update: dict
+    update: dict | None = None
 
 # Load encrypted code and Fernet key
-with open("obfuscated_code.bin", "rb") as f:
-    encrypted_code = f.read()
-with open("fernet_key.bin", "rb") as f:
-    fernet_key = f.read()
+try:
+    with open("obfuscated_code.bin", "rb") as f:
+        encrypted_code = f.read()
+    with open("fernet_key.bin", "rb") as f:
+        fernet_key = f.read()
+except FileNotFoundError as e:
+    logger.error(f"Missing file: {str(e)}")
+    raise Exception(f"Missing file: {str(e)}")
 
 @app.post("/execute")
 async def execute_code(request: ExecutionRequest):
@@ -90,42 +95,52 @@ async def execute_code(request: ExecutionRequest):
     raise HTTPException(status_code=400, detail="Request timed out or rejected")
 
 @app.post("/handle_callback")
-async def handle_callback(callback: CallbackRequest):
-    update = telegram.Update.de_json(callback.update, bot)
-    logger.info(f"Received Telegram update: {callback.update}")
+async def handle_callback(request: Request):
+    # Log raw payload
+    raw_payload = await request.json()
+    logger.info(f"Raw callback payload: {raw_payload}")
     
-    if not update.callback_query:
-        logger.info("Ignoring non-callback update")
-        return {"status": "ignored"}
-    
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    logger.info(f"Processing callback data: {data}")
-    
-    if not data:
-        logger.error("No callback data received")
-        return {"status": "error", "message": "No callback data"}
-    
-    if data.startswith("accept_") or data.startswith("reject_"):
-        request_id = data.split("_", 1)[1]
-        if request_id not in pending_requests:
-            logger.error(f"Unknown request ID: {request_id}")
-            await query.message.edit_text("Error: Request ID not found or expired")
-            return {"status": "error", "message": "Unknown request ID"}
+    try:
+        callback = CallbackRequest(update=raw_payload)
+        update = telegram.Update.de_json(callback.update, bot)
         
-        if data.startswith("accept_"):
-            pending_requests[request_id]["approved"] = True
-            logger.info(f"Approved request ID: {request_id}")
-            await query.message.edit_text(f"Request ID {request_id} approved")
-        else:
-            del pending_requests[request_id]
-            logger.info(f"Rejected request ID: {request_id}")
-            await query.message.edit_text(f"Request ID {request_id} rejected")
+        if not update or not update.callback_query:
+            logger.info("Ignoring non-callback update")
+            return {"status": "ignored"}
         
-        logger.info(f"Answered callback query ID: {query.id}")
-        return {"status": "processed"}
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        logger.info(f"Processing callback data: {data}")
+        
+        if not data:
+            logger.error("No callback data received")
+            await query.message.edit_text("Error: No callback data")
+            return {"status": "error", "message": "No callback data"}
+        
+        if data.startswith("accept_") or data.startswith("reject_"):
+            request_id = data.split("_", 1)[1]
+            if request_id not in pending_requests:
+                logger.error(f"Unknown request ID: {request_id}")
+                await query.message.edit_text("Error: Request ID not found or expired")
+                return {"status": "error", "message": "Unknown request ID"}
+            
+            if data.startswith("accept_"):
+                pending_requests[request_id]["approved"] = True
+                logger.info(f"Approved request ID: {request_id}")
+                await query.message.edit_text(f"Request ID {request_id} approved")
+            else:
+                del pending_requests[request_id]
+                logger.info(f"Rejected request ID: {request_id}")
+                await query.message.edit_text(f"Request ID {request_id} rejected")
+            
+            logger.info(f"Answered callback query ID: {query.id}")
+            return {"status": "processed"}
+        
+        logger.error("Unknown callback data")
+        return {"status": "error", "message": "Unknown callback data"}
     
-    logger.error("Unknown callback data")
-    return {"status": "error", "message": "Unknown callback data"}
+    except Exception as e:
+        logger.error(f"Error processing callback: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"Error processing callback: {str(e)}")
